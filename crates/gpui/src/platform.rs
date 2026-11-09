@@ -201,6 +201,10 @@ pub trait Platform: 'static {
     fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>);
 
     fn thermal_state(&self) -> ThermalState;
+    /// yeti: whether the system asks apps to save power (macOS Low Power Mode).
+    fn low_power_mode(&self) -> bool {
+        false
+    }
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>);
 
     fn compositor_name(&self) -> &'static str {

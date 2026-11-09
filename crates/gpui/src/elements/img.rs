@@ -695,7 +695,7 @@ impl Asset for ImageAssetLoader {
                         }
                     }
                     _ => {
-                        let dyn_img = image::load_from_memory_with_format(&bytes, format)?;
+                        let dyn_img = decode_upright(&bytes, format)?;
                         let dyn_img = if dyn_img.width() > MAX_DECODE_PX || dyn_img.height() > MAX_DECODE_PX {
                             dyn_img.thumbnail(MAX_DECODE_PX, MAX_DECODE_PX)
                         } else {
@@ -720,6 +720,17 @@ impl Asset for ImageAssetLoader {
             }
         }
     }
+}
+
+/// yeti: decodes `bytes` and turns it upright by its EXIF orientation (phone photos are often
+/// stored sideways with a tag saying how to rotate them).
+fn decode_upright(bytes: &[u8], format: ImageFormat) -> image::ImageResult<DynamicImage> {
+    use image::ImageDecoder as _;
+    let mut decoder = image::ImageReader::with_format(Cursor::new(bytes), format).into_decoder()?;
+    let orientation = decoder.orientation().unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut img = DynamicImage::from_decoder(decoder)?;
+    img.apply_orientation(orientation);
+    Ok(img)
 }
 
 /// Decoded images are capped at this many pixels on their longer side (memory guard for huge

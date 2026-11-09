@@ -1012,6 +1012,8 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
+    /// yeti: frame-time overlay (from Zed), painted straight into the scene when shown.
+    debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1316,14 +1318,17 @@ impl Window {
             let pending_callbacks = next_frame_callbacks.clone();
             let input_rate_tracker = input_rate_tracker.clone();
             move |request_frame_options| {
-                let thermal_state = cx.update(|cx| cx.thermal_state());
+                let (thermal_state, low_power) =
+                    cx.update(|cx| (cx.thermal_state(), cx.low_power_mode()));
 
-                let min_frame_interval = if !request_frame_options.force_render
-                    && !request_frame_options.require_presentation
-                    && next_frame_callbacks.borrow().is_empty()
+                // yeti: frame-rate caps apply to every redraw (a notified view, an animation),
+                // not only to forced frames: 30 fps for an inactive window or in Low Power Mode,
+                // 60 fps when the system is hot. Frames the platform requires are never held.
+                let min_frame_interval = if request_frame_options.force_render
+                    || request_frame_options.require_presentation
                 {
                     None
-                } else if !active.get() {
+                } else if !active.get() || low_power {
                     Some(Duration::from_micros(33333))
                 } else if matches!(
                     thermal_state,
@@ -1336,6 +1341,9 @@ impl Window {
 
                 let now = Instant::now();
                 if let Some(min_interval) = min_frame_interval {
+                    // A little slack for refresh jitter: on a 120 Hz display a strict 16.67 ms
+                    // test often skips one extra refresh, turning a 60 fps cap into 40 fps.
+                    let min_interval = min_interval.saturating_sub(Duration::from_millis(2));
                     if let Some(last_frame) = last_frame_time.get()
                         && now.duration_since(last_frame) < min_interval
                     {
@@ -1697,6 +1705,7 @@ impl Window {
             element_opacity: 1.0,
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay::new(),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
@@ -2277,6 +2286,28 @@ impl Window {
         self.draw(cx)
     }
 
+    /// yeti: the frame-time overlay's mode (from Zed's debug overlay).
+    pub fn debug_frame_overlay_mode(&self) -> crate::DebugFrameOverlayMode {
+        self.debug_frame_overlay.mode()
+    }
+
+    /// yeti: shows, details or hides the frame-time overlay, and redraws.
+    pub fn set_debug_frame_overlay_mode(&mut self, mode: crate::DebugFrameOverlayMode) {
+        self.debug_frame_overlay.set_mode(mode);
+        self.refresh();
+    }
+
+    /// yeti: steps the frame-time overlay through hidden, frame time, and detailed.
+    pub fn cycle_debug_frame_overlay_mode(&mut self) {
+        self.set_debug_frame_overlay_mode(self.debug_frame_overlay.mode().next());
+    }
+
+    /// yeti: clears the frame-time overlay's statistics (keeps the frame count), and redraws.
+    pub fn reset_debug_frame_overlay_stats(&mut self) {
+        self.debug_frame_overlay.reset_stats();
+        self.refresh();
+    }
+
     /// yeti: whether something was invalidated since the last frame was drawn.
     pub fn needs_draw(&self) -> bool {
         self.invalidator.is_dirty()
@@ -2759,6 +2790,7 @@ impl Window {
         // Set up the per-App arena for element allocation during this draw.
         // This ensures that multiple test Apps have isolated arenas.
         let _arena_scope = ElementArenaScope::enter(&cx.element_arena);
+        let draw_started = std::time::Instant::now();
 
         self.invalidate_entities();
         cx.entities.clear_accessed();
@@ -2776,6 +2808,9 @@ impl Window {
             {
                 self.draw_surfaces(cx);
             }
+            let (viewport_size, scale_factor) = (self.viewport_size, self.scale_factor());
+            self.debug_frame_overlay
+                .paint(&mut self.next_frame.scene, viewport_size, scale_factor);
         }
         self.dirty_views.clear();
         self.next_frame.window_active = self.active.get();
@@ -2830,6 +2865,9 @@ impl Window {
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
         self.needs_present.set(true);
+        if self.debug_frame_overlay.is_enabled() {
+            self.debug_frame_overlay.record_frame(draw_started.elapsed());
+        }
 
         ArenaClearNeeded::new(&cx.element_arena)
     }
@@ -4193,11 +4231,13 @@ impl Window {
     }
 
     fn should_use_subpixel_rendering(&self, font_id: FontId, font_size: Pixels) -> bool {
-        if self.platform_window.background_appearance() != WindowBackgroundAppearance::Opaque {
+        // yeti (from Zed): checked first because it's cheap, while some platforms lock the window
+        // to read its background appearance, and this runs for every glyph.
+        if !self.platform_window.is_subpixel_rendering_supported() {
             return false;
         }
 
-        if !self.platform_window.is_subpixel_rendering_supported() {
+        if self.platform_window.background_appearance() != WindowBackgroundAppearance::Opaque {
             return false;
         }
 

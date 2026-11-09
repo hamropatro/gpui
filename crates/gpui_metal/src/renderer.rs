@@ -208,7 +208,9 @@ impl MetalRenderer {
         // Support direct-to-display rendering if the window is not transparent
         // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
         layer.set_opaque(!transparent);
-        layer.set_maximum_drawable_count(3);
+        // yeti: two drawables, not three: a window-sized buffer less (about 15–30 MB at 2×)
+        // with no measured cost to frame pacing (after zeron).
+        layer.set_maximum_drawable_count(2);
         // Allow texture reading for visual tests (captures screenshots without ScreenCaptureKit)
         #[cfg(any(test, feature = "test-support"))]
         layer.set_framebuffer_only(false);
@@ -391,7 +393,9 @@ impl MetalRenderer {
         layer.set_device(&self.shared.device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_opaque(self.layer.is_opaque());
-        layer.set_maximum_drawable_count(3);
+        // yeti: two drawables, not three: a window-sized buffer less (about 15–30 MB at 2×)
+        // with no measured cost to frame pacing (after zeron).
+        layer.set_maximum_drawable_count(2);
         self.layer = layer;
     }
 
@@ -574,7 +578,9 @@ impl SurfaceRenderer {
         layer.set_device(&shared.device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_opaque(!transparent);
-        layer.set_maximum_drawable_count(3);
+        // yeti: two drawables, not three: a window-sized buffer less (about 15–30 MB at 2×)
+        // with no measured cost to frame pacing (after zeron).
+        layer.set_maximum_drawable_count(2);
         unsafe {
             // On macOS, disable drawable timeout to prevent frame drops during compositing.
             // On iOS, MUST allow timeout — blocking nextDrawable on the main thread

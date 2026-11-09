@@ -17,6 +17,7 @@ mod asset_cache;
 mod assets;
 mod bounds_tree;
 mod color;
+mod debug_overlay;
 pub mod composite_hosts;
 /// The default colors used by GPUI.
 pub mod colors;
@@ -85,6 +86,7 @@ pub use anyhow::Result;
 pub use app::*;
 pub(crate) use arena::*;
 pub use asset_cache::*;
+pub use debug_overlay::DebugFrameOverlayMode;
 pub use assets::*;
 pub use color::*;
 pub use ctor::ctor;
