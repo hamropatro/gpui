@@ -653,6 +653,7 @@ pub struct App {
 
     // assets
     pub(crate) loading_assets: FxHashMap<(TypeId, u64), Box<dyn Any>>,
+    pub(crate) loading_assets_order: VecDeque<(TypeId, u64)>,
     asset_source: Arc<dyn AssetSource>,
     pub(crate) svg_renderer: SvgRenderer,
     http_client: Arc<dyn HttpClient>,
@@ -725,6 +726,7 @@ impl App {
                 foreground_executor,
                 svg_renderer: SvgRenderer::new(asset_source.clone()),
                 loading_assets: Default::default(),
+                loading_assets_order: VecDeque::new(),
                 asset_source,
                 http_client,
                 globals_by_type: FxHashMap::default(),
@@ -2282,10 +2284,22 @@ impl App {
         self.prompt_builder = Some(PromptBuilder::Default);
     }
 
+    fn drop_boxed_asset(&mut self, boxed_task: Box<dyn Any>) {
+        if let Ok(task) = boxed_task
+            .downcast::<Shared<Task<Result<Arc<RenderImage>, crate::ImageCacheError>>>>()
+        {
+            if let Some(Ok(image)) = task.now_or_never() {
+                self.drop_image(image, None);
+            }
+        }
+    }
+
     /// Remove an asset from GPUI's cache
     pub fn remove_asset<A: Asset>(&mut self, source: &A::Source) {
         let asset_id = (TypeId::of::<A>(), hash(source));
-        self.loading_assets.remove(&asset_id);
+        if let Some(boxed_task) = self.loading_assets.remove(&asset_id) {
+            self.drop_boxed_asset(boxed_task);
+        }
     }
 
     /// Asynchronously load an asset, if the asset hasn't finished loading this will return None.
@@ -2293,6 +2307,7 @@ impl App {
     /// Note that the multiple calls to this method will only result in one `Asset::load` call at a
     /// time, and the results of this call will be cached
     pub fn fetch_asset<A: Asset>(&mut self, source: &A::Source) -> (Shared<Task<A::Output>>, bool) {
+        const MAX_CACHED_ASSETS: usize = 80;
         let asset_id = (TypeId::of::<A>(), hash(source));
         let mut is_first = false;
         let task = self
@@ -2307,6 +2322,20 @@ impl App {
             });
 
         self.loading_assets.insert(asset_id, Box::new(task.clone()));
+        if is_first {
+            self.loading_assets_order.push_back(asset_id);
+            while self.loading_assets.len() > MAX_CACHED_ASSETS {
+                let Some(oldest_id) = self.loading_assets_order.pop_front() else {
+                    break;
+                };
+                if oldest_id == asset_id {
+                    continue;
+                }
+                if let Some(evicted) = self.loading_assets.remove(&oldest_id) {
+                    self.drop_boxed_asset(evicted);
+                }
+            }
+        }
 
         (task, is_first)
     }
@@ -2365,6 +2394,15 @@ impl App {
         // remove the texture from the current window
         if let Some(window) = current_window {
             _ = window.drop_image(image);
+        } else if self.windows.values().any(|w| w.is_none()) {
+            // If a window is currently checked out on the stack (e.g., during `Window::draw` or a
+            // `cx.listener` callback) and `current_window` was not passed, defer dropping so the
+            // checked-out window's sprite atlas also evicts the texture as soon as it is returned.
+            self.defer(move |cx| {
+                for window in cx.windows.values_mut().flatten() {
+                    _ = window.drop_image(image.clone());
+                }
+            });
         }
     }
 

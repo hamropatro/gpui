@@ -4334,17 +4334,34 @@ impl Window {
     /// This method should only be called as part of the paint phase of element drawing.
     #[cfg(target_os = "macos")]
     pub fn paint_surface(&mut self, bounds: Bounds<Pixels>, image_buffer: CVPixelBuffer) {
+        self.paint_surface_rounded(bounds, bounds, Corners::default(), image_buffer);
+    }
+
+    /// Paints a CoreVideo surface at `bounds`, masked to the rounded rectangle `mask_bounds` with
+    /// `corner_radii` (so a cover-fitted video keeps the frame's rounded corners).
+    #[cfg(target_os = "macos")]
+    pub fn paint_surface_rounded(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        mask_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        image_buffer: CVPixelBuffer,
+    ) {
         use crate::PaintSurface;
 
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
         let bounds = bounds.scale(scale_factor);
+        let mask_bounds = mask_bounds.scale(scale_factor);
+        let corner_radii = corner_radii.scale(scale_factor);
         let content_mask = self.content_mask().scale(scale_factor);
         self.next_frame.scene.insert_primitive(PaintSurface {
             order: 0,
             bounds,
             content_mask,
+            mask_bounds,
+            corner_radii,
             image_buffer,
         });
     }

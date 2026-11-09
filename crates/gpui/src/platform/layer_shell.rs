@@ -2,6 +2,7 @@
 
 use crate::Pixels;
 use bitflags::bitflags;
+use thiserror::Error;
 
 /// The Wayland layer a layer-shell surface should occupy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -62,3 +63,9 @@ pub struct LayerShellOptions {
     /// How keyboard focus should be handled.
     pub keyboard_interactivity: KeyboardInteractivity,
 }
+
+/// An error indicating that an action failed because the compositor doesn't support the required
+/// layer_shell protocol.
+#[derive(Debug, Error)]
+#[error("Compositor doesn't support zwlr_layer_shell_v1")]
+pub struct LayerShellNotSupportedError;

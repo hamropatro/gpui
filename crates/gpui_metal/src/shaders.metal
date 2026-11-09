@@ -837,13 +837,25 @@ fragment float4 path_sprite_fragment(
 struct SurfaceVertexOutput {
   float4 position [[position]];
   float2 texture_position;
+  uint surface_id [[flat]];
   float clip_distance [[clip_distance]][4];
 };
 
 struct SurfaceFragmentInput {
   float4 position [[position]];
   float2 texture_position;
+  uint surface_id [[flat]];
 };
+
+// Coverage of the surface's rounded mask at this pixel (1 inside, antialiased at the edge).
+float surface_mask_alpha(float2 point, SurfaceBounds surface) {
+  if (surface.corner_radii.top_left == 0.0 && surface.corner_radii.top_right == 0.0 &&
+      surface.corner_radii.bottom_left == 0.0 && surface.corner_radii.bottom_right == 0.0) {
+    return 1.0;
+  }
+  float distance = quad_sdf(point, surface.mask_bounds, surface.corner_radii);
+  return saturate(0.5 - distance);
+}
 
 vertex SurfaceVertexOutput surface_vertex(
     uint unit_vertex_id [[vertex_id]], uint surface_id [[instance_id]],
@@ -865,6 +877,7 @@ vertex SurfaceVertexOutput surface_vertex(
   return SurfaceVertexOutput{
       device_position,
       texture_position,
+      surface_id,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
@@ -872,7 +885,9 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
                                  texture2d<float> y_texture
                                  [[texture(SurfaceInputIndex_YTexture)]],
                                  texture2d<float> cb_cr_texture
-                                 [[texture(SurfaceInputIndex_CbCrTexture)]]) {
+                                 [[texture(SurfaceInputIndex_CbCrTexture)]],
+                                 constant SurfaceBounds *surfaces
+                                 [[buffer(SurfaceInputIndex_Surfaces)]]) {
   constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
   const float4x4 ycbcrToRGBTransform =
       float4x4(float4(+1.0000f, +1.0000f, +1.0000f, +0.0000f),
@@ -883,14 +898,20 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
       y_texture.sample(texture_sampler, input.texture_position).r,
       cb_cr_texture.sample(texture_sampler, input.texture_position).rg, 1.0);
 
-  return ycbcrToRGBTransform * ycbcr;
+  float4 color = ycbcrToRGBTransform * ycbcr;
+  color.a = surface_mask_alpha(input.position.xy, surfaces[input.surface_id]);
+  return color;
 }
 
 fragment float4 surface_bgra_fragment(SurfaceFragmentInput input [[stage_in]],
                                       texture2d<float> bgra_texture
-                                      [[texture(SurfaceInputIndex_YTexture)]]) {
+                                      [[texture(SurfaceInputIndex_YTexture)]],
+                                      constant SurfaceBounds *surfaces
+                                      [[buffer(SurfaceInputIndex_Surfaces)]]) {
   constexpr sampler texture_sampler(mag_filter::linear, min_filter::linear);
-  return bgra_texture.sample(texture_sampler, input.texture_position);
+  float4 color = bgra_texture.sample(texture_sampler, input.texture_position);
+  color.a *= surface_mask_alpha(input.position.xy, surfaces[input.surface_id]);
+  return color;
 }
 
 float4 hsla_to_rgba(Hsla hsla) {

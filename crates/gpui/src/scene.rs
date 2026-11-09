@@ -716,6 +716,9 @@ pub struct PaintSurface {
     pub order: DrawOrder,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+    /// The rounded rectangle the surface is masked to (the element's frame; `bounds` may overflow it).
+    pub mask_bounds: Bounds<ScaledPixels>,
+    pub corner_radii: Corners<ScaledPixels>,
     #[cfg(target_os = "macos")]
     pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
 }

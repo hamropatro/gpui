@@ -90,15 +90,23 @@ impl Element for Surface {
         _: &mut Self::RequestLayoutState,
         _: &mut Self::PrepaintState,
         #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] window: &mut Window,
-        _: &mut App,
+        _cx: &mut App,
     ) {
         match &self.source {
             #[cfg(target_os = "macos")]
             SurfaceSource::Surface(surface) => {
                 let size = crate::size(surface.get_width().into(), surface.get_height().into());
                 let new_bounds = self.object_fit.get_bounds(bounds, size);
-                // TODO: Add support for corner_radii
-                window.paint_surface(new_bounds, surface.clone());
+                let mut style = Style::default();
+                style.refine(&self.style);
+                let radii = style
+                    .corner_radii
+                    .to_pixels(window.rem_size())
+                    .clamp_radii_for_quad_size(bounds.size);
+                // Clip a cover-fitted surface to the element and round it at the element's frame.
+                window.with_content_mask(Some(crate::ContentMask { bounds }), |window| {
+                    window.paint_surface_rounded(new_bounds, bounds, radii, surface.clone());
+                });
             }
             #[allow(unreachable_patterns)]
             _ => {}

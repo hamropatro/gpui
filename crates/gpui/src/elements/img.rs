@@ -678,7 +678,13 @@ impl Asset for ImageAssetLoader {
 
                             frames
                         } else {
-                            let mut data = DynamicImage::from_decoder(decoder)?.into_rgba8();
+                            let dyn_img = DynamicImage::from_decoder(decoder)?;
+                            let dyn_img = if dyn_img.width() > MAX_DECODE_PX || dyn_img.height() > MAX_DECODE_PX {
+                                dyn_img.thumbnail(MAX_DECODE_PX, MAX_DECODE_PX)
+                            } else {
+                                dyn_img
+                            };
+                            let mut data = dyn_img.into_rgba8();
 
                             // Convert from RGBA to BGRA.
                             for pixel in data.chunks_exact_mut(4) {
@@ -689,8 +695,13 @@ impl Asset for ImageAssetLoader {
                         }
                     }
                     _ => {
-                        let mut data =
-                            image::load_from_memory_with_format(&bytes, format)?.into_rgba8();
+                        let dyn_img = image::load_from_memory_with_format(&bytes, format)?;
+                        let dyn_img = if dyn_img.width() > MAX_DECODE_PX || dyn_img.height() > MAX_DECODE_PX {
+                            dyn_img.thumbnail(MAX_DECODE_PX, MAX_DECODE_PX)
+                        } else {
+                            dyn_img
+                        };
+                        let mut data = dyn_img.into_rgba8();
 
                         // Convert from RGBA to BGRA.
                         for pixel in data.chunks_exact_mut(4) {
@@ -710,6 +721,10 @@ impl Asset for ImageAssetLoader {
         }
     }
 }
+
+/// Decoded images are capped at this many pixels on their longer side (memory guard for huge
+/// originals); large enough for full-width pictures on 2× displays.
+const MAX_DECODE_PX: u32 = 2400;
 
 /// An error that can occur when interacting with the image cache.
 #[derive(Debug, Error, Clone)]

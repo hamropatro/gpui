@@ -1471,6 +1471,11 @@ fn draw_surfaces_batch(
             Some(&instance_buffer.metal_buffer),
             *instance_offset as u64,
         );
+        command_encoder.set_fragment_buffer(
+            SurfaceInputIndex::Surfaces as u64,
+            Some(&instance_buffer.metal_buffer),
+            *instance_offset as u64,
+        );
         command_encoder.set_vertex_bytes(
             SurfaceInputIndex::TextureSize as u64,
             mem::size_of_val(&texture_size) as u64,
@@ -1538,6 +1543,8 @@ fn draw_surfaces_batch(
                 SurfaceBounds {
                     bounds: surface.bounds,
                     content_mask: surface.content_mask.clone(),
+                    mask_bounds: surface.mask_bounds,
+                    corner_radii: surface.corner_radii,
                 },
             );
         }
@@ -1745,4 +1752,6 @@ pub struct PathSprite {
 pub struct SurfaceBounds {
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+    pub mask_bounds: Bounds<ScaledPixels>,
+    pub corner_radii: gpui::Corners<ScaledPixels>,
 }

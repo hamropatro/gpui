@@ -1,7 +1,7 @@
 use anyhow::{Context as _, Result};
 use collections::FxHashMap;
 use derive_more::{Deref, DerefMut};
-use etagere::BucketedAtlasAllocator;
+use etagere::AtlasAllocator;
 use gpui::{
     AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels,
     PlatformAtlas, Size,
@@ -61,9 +61,10 @@ impl PlatformAtlas for MetalAtlas {
 
     fn remove(&self, key: &AtlasKey) {
         let mut lock = self.0.lock();
-        let Some(id) = lock.tiles_by_key.remove(key).map(|v| v.texture_id) else {
+        let Some(tile) = lock.tiles_by_key.remove(key) else {
             return;
         };
+        let id = tile.texture_id;
 
         let textures = match id.kind {
             AtlasTextureKind::Monochrome => &mut lock.monochrome_textures,
@@ -80,6 +81,7 @@ impl PlatformAtlas for MetalAtlas {
         };
 
         if let Some(mut texture) = texture_slot.take() {
+            texture.allocator.deallocate(tile.tile_id.into());
             texture.decrement_ref_count();
 
             if texture.is_unreferenced() {
@@ -123,8 +125,8 @@ impl MetalAtlasState {
         kind: AtlasTextureKind,
     ) -> &mut MetalAtlasTexture {
         const DEFAULT_ATLAS_SIZE: Size<DevicePixels> = Size {
-            width: DevicePixels(1024),
-            height: DevicePixels(1024),
+            width: DevicePixels(2048),
+            height: DevicePixels(2048),
         };
         // Max texture size on all modern Apple GPUs. Anything bigger than that crashes in validateWithDevice.
         const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
@@ -171,7 +173,7 @@ impl MetalAtlasState {
                 index: index.unwrap_or(texture_list.textures.len()) as u32,
                 kind,
             },
-            allocator: etagere::BucketedAtlasAllocator::new(size.into()),
+            allocator: etagere::AtlasAllocator::new(size.into()),
             metal_texture: AssertSend(metal_texture),
             live_atlas_keys: 0,
         };
@@ -200,7 +202,7 @@ impl MetalAtlasState {
 
 struct MetalAtlasTexture {
     id: AtlasTextureId,
-    allocator: BucketedAtlasAllocator,
+    allocator: AtlasAllocator,
     metal_texture: AssertSend<metal::Texture>,
     live_atlas_keys: u32,
 }
@@ -323,5 +325,40 @@ mod tests {
         };
 
         atlas.remove(&make_image_key(999, 0));
+    }
+
+    #[test]
+    fn remove_deallocates_tile_in_shared_texture() {
+        let Some(atlas) = create_atlas() else {
+            return;
+        };
+
+        let frame_size = Size {
+            width: DevicePixels(720),
+            height: DevicePixels(1280),
+        };
+        let icon_size = Size {
+            width: DevicePixels(32),
+            height: DevicePixels(32),
+        };
+
+        // Allocate first video frame + a pinned icon in the same texture
+        let first_frame_key = make_image_key(10, 0);
+        let first_tile = insert_tile(&atlas, &first_frame_key, frame_size);
+        let pinned_icon_key = make_image_key(1, 0);
+        let icon_tile = insert_tile(&atlas, &pinned_icon_key, icon_size);
+        assert_eq!(first_tile.texture_id, icon_tile.texture_id);
+
+        atlas.remove(&first_frame_key);
+
+        // Stream 100 subsequent 720x1280 video frames, removing each previous frame.
+        // Because `remove` deallocates the tile from `BucketedAtlasAllocator`, every single frame
+        // must reuse the exact same `MetalAtlasTexture` instead of leaking new Metal textures!
+        for i in 11..111 {
+            let key = make_image_key(i, 0);
+            let tile = insert_tile(&atlas, &key, frame_size);
+            assert_eq!(tile.texture_id, first_tile.texture_id);
+            atlas.remove(&key);
+        }
     }
 }

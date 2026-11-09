@@ -239,6 +239,12 @@ impl LineWrapper {
         // Bengali (https://en.wikipedia.org/wiki/Bengali_(Unicode_block))
         matches!(c, '\u{0980}'..='\u{09FF}') ||
 
+        // Devanagari for Nepali / Hindi: consonants, vowel signs and virama must stay in one
+        // word, or a line can break between a letter and its matra (e.g. "महाक / वि").
+        matches!(c, '\u{0900}'..='\u{097F}') ||
+        matches!(c, '\u{A8E0}'..='\u{A8FF}') || // Devanagari Extended
+        matches!(c, '\u{200C}' | '\u{200D}') || // ZWNJ / ZWJ inside conjuncts
+
         // Some other known special characters that should be treated as word characters,
         // e.g. `a-b`, `var_name`, `I'm`, '@mention`, `#hashtag`, `100%`, `3.1415`,
         // `2^3`, `a~b`, `a=1`, `Self::new`, etc.
