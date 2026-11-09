@@ -19,8 +19,9 @@ mod shader_compilation {
     };
 
     pub fn compile_shaders() {
-        let shader_path =
-            PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("src/shaders.hlsl");
+        let shader_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+            .join("src")
+            .join("shaders.hlsl");
         let out_dir = std::env::var("OUT_DIR").unwrap();
 
         println!("cargo:rerun-if-changed={}", shader_path.display());
@@ -40,7 +41,10 @@ mod shader_compilation {
             "polychrome_sprite",
         ];
 
-        let rust_binding_path = format!("{}/shaders_bytes.rs", out_dir);
+        let rust_binding_path = Path::new(&out_dir)
+            .join("shaders_bytes.rs")
+            .to_string_lossy()
+            .into_owned();
         if Path::new(&rust_binding_path).exists() {
             fs::remove_file(&rust_binding_path)
                 .expect("Failed to remove existing Rust binding file");
@@ -57,7 +61,8 @@ mod shader_compilation {
 
         {
             let shader_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
-                .join("src/color_text_raster.hlsl");
+                .join("src")
+                .join("color_text_raster.hlsl");
             compile_shader_for_module(
                 "emoji_rasterization",
                 &out_dir,
@@ -146,7 +151,10 @@ mod shader_compilation {
         rust_binding_path: &str,
     ) {
         // Compile vertex shader
-        let output_file = format!("{}/{}_vs.h", out_dir, module);
+        let output_file = Path::new(out_dir)
+            .join(format!("{}_vs.h", module))
+            .to_string_lossy()
+            .into_owned();
         let const_name = format!("{}_VERTEX_BYTES", module.to_uppercase());
         compile_shader_impl(
             fxc_path,
@@ -159,7 +167,10 @@ mod shader_compilation {
         generate_rust_binding(&const_name, &output_file, rust_binding_path);
 
         // Compile fragment shader
-        let output_file = format!("{}/{}_ps.h", out_dir, module);
+        let output_file = Path::new(out_dir)
+            .join(format!("{}_ps.h", module))
+            .to_string_lossy()
+            .into_owned();
         let const_name = format!("{}_FRAGMENT_BYTES", module.to_uppercase());
         compile_shader_impl(
             fxc_path,

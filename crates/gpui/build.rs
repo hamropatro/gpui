@@ -26,10 +26,6 @@ mod windows {
     };
 
     pub(super) fn build() {
-        // Compile HLSL shaders
-        #[cfg(not(debug_assertions))]
-        compile_shaders();
-
         // Embed the Windows manifest and resource file
         #[cfg(feature = "windows-manifest")]
         embed_resource();

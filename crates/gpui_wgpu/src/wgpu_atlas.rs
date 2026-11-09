@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result};
 use collections::FxHashMap;
-use etagere::{BucketedAtlasAllocator, size2};
+use etagere::{AtlasAllocator, size2};
 use gpui::{
     AtlasKey, AtlasTextureId, AtlasTextureKind, AtlasTextureList, AtlasTile, Bounds, DevicePixels,
     PlatformAtlas, Point, Size,
@@ -104,15 +104,17 @@ impl PlatformAtlas for WgpuAtlas {
     fn remove(&self, key: &AtlasKey) {
         let mut lock = self.0.lock();
 
-        let Some(id) = lock.tiles_by_key.remove(key).map(|tile| tile.texture_id) else {
+        let Some(tile) = lock.tiles_by_key.remove(key) else {
             return;
         };
+        let id = tile.texture_id;
 
         let Some(texture_slot) = lock.storage[id.kind].textures.get_mut(id.index as usize) else {
             return;
         };
 
         if let Some(mut texture) = texture_slot.take() {
+            texture.allocator.deallocate(tile.tile_id.into());
             texture.decrement_ref_count();
             if texture.is_unreferenced() {
                 lock.pending_uploads
@@ -196,7 +198,7 @@ impl WgpuAtlasState {
                 index: index.unwrap_or(texture_list.textures.len()) as u32,
                 kind,
             },
-            allocator: BucketedAtlasAllocator::new(device_size_to_etagere(size)),
+            allocator: AtlasAllocator::new(device_size_to_etagere(size)),
             format,
             texture,
             view,
@@ -315,7 +317,7 @@ impl ops::Index<AtlasTextureId> for WgpuAtlasStorage {
 
 struct WgpuAtlasTexture {
     id: AtlasTextureId,
-    allocator: BucketedAtlasAllocator,
+    allocator: AtlasAllocator,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     format: wgpu::TextureFormat,

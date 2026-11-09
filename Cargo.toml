@@ -94,11 +94,17 @@ derive_refineable = { path = "crates/refineable/derive_refineable" }
 #
 
 anyhow = "1.0.86"
-ashpd = { version = "0.12.1", default-features = false, features = ["async-std"] }
+ashpd = { version = "0.13", default-features = false, features = [
+    "async-io",
+    "inhibit",
+    "open_uri",
+    "file_chooser",
+    "settings",
+] }
 async-channel = "2.5.0"
 async-compression = { version = "0.4", features = ["bzip2", "gzip", "futures-io"] }
 async-fs = "2.1"
-async-tar = "0.5.1"
+async-tar = { version = "0.5.1", default-features = false }
 async-task = "4.7"
 async_zip = { version = "0.0.18", features = ["deflate", "deflate64"] }
 backtrace = "0.3"
@@ -207,6 +213,7 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Imaging",
     "Win32_Graphics_Hlsl",
+    "Win32_Media",
     "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Security_Credentials",
