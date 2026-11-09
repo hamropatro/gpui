@@ -1014,6 +1014,8 @@ pub struct Window {
     pub(crate) next_frame: Frame,
     /// yeti: frame-time overlay (from Zed), painted straight into the scene when shown.
     debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
+    /// yeti: `dispatch_synthetic_event` is running.
+    dispatching_synthetic: bool,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1706,6 +1708,7 @@ impl Window {
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay::new(),
+            dispatching_synthetic: false,
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
@@ -2283,7 +2286,11 @@ impl Window {
         for callback in callbacks {
             callback(self, cx);
         }
-        self.draw(cx)
+        let arena_clear_needed = self.draw(cx);
+        // The new frame is drawn but not presented: wake the platform so it presents it (and
+        // the screen matches the hit-testing state, which follows `rendered_frame`).
+        self.invalidator.wake();
+        arena_clear_needed
     }
 
     /// yeti: the frame-time overlay's mode (from Zed's debug overlay).
@@ -2308,9 +2315,10 @@ impl Window {
         self.refresh();
     }
 
-    /// yeti: whether something was invalidated since the last frame was drawn.
+    /// yeti: whether a frame is wanted: something was invalidated since the last frame was
+    /// drawn, or a next-frame callback (an animation, `on_next_frame`) is waiting.
     pub fn needs_draw(&self) -> bool {
-        self.invalidator.is_dirty()
+        self.invalidator.is_dirty() || !self.next_frame_callbacks.borrow().is_empty()
     }
 
     /// Set the content size of the window.
@@ -4865,6 +4873,20 @@ impl Window {
             .unwrap_or_else(|| action.name().to_string())
     }
 
+    /// yeti: dispatches an event the app made itself (e.g. a slice of a smoothed wheel scroll).
+    /// It is handled like `dispatch_event`, but doesn't count as user input for the input-rate
+    /// tracker, which would keep the window presenting for a second after it.
+    pub fn dispatch_synthetic_event(
+        &mut self,
+        event: PlatformInput,
+        cx: &mut App,
+    ) -> DispatchEventResult {
+        let was = std::mem::replace(&mut self.dispatching_synthetic, true);
+        let result = self.dispatch_event(event, cx);
+        self.dispatching_synthetic = was;
+        result
+    }
+
     /// Dispatch a mouse or keyboard event on the window.
     #[profiling::function]
     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
@@ -4986,7 +5008,7 @@ impl Window {
             self.captured_hitbox = None;
         }
 
-        if self.invalidator.is_dirty() {
+        if self.invalidator.is_dirty() && !self.dispatching_synthetic {
             self.input_rate_tracker.borrow_mut().record_input();
         }
 

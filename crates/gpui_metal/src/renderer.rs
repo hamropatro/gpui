@@ -42,6 +42,7 @@ struct CGSize {
 type NSUInteger = u64;
 const YES: objc::runtime::BOOL = true;
 #[cfg(target_os = "macos")]
+#[allow(dead_code)]
 const NO: objc::runtime::BOOL = false;
 
 // Exported to metal
@@ -218,8 +219,10 @@ impl MetalRenderer {
             // On macOS, disable drawable timeout to prevent frame drops during compositing.
             // On iOS, MUST allow timeout — blocking nextDrawable on the main thread
             // (where CADisplayLink fires) deadlocks the run loop.
+            // yeti: with two drawables (see above), a stalled compositor could block
+            // `nextDrawable` indefinitely; let it time out (one second) and drop that frame.
             #[cfg(target_os = "macos")]
-            let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: NO];
+            let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: YES];
             #[cfg(target_os = "ios")]
             let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: YES];
             let _: () = msg_send![&*layer, setNeedsDisplayOnBoundsChange: YES];
@@ -433,6 +436,10 @@ impl MetalRenderer {
             height: DevicePixels(cg_size.height as i32),
         };
         // yeti: the path textures are made when a frame first draws paths (see PathTextureLife).
+        // The window re-syncs its size after every frame: keep them while it is unchanged.
+        if self.path_textures.size == device_pixels_size {
+            return;
+        }
         self.path_textures.size = device_pixels_size;
         self.path_intermediate_texture = None;
         self.path_intermediate_msaa_texture = None;
@@ -479,9 +486,19 @@ impl MetalRenderer {
             (viewport_size.width.ceil() as i32).into(),
             (viewport_size.height.ceil() as i32).into(),
         );
-        let drawable = layer
-            .next_drawable()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get drawable for render_to_image"))?;
+        // yeti: render into a texture of our own, not a layer drawable: a drawable may be
+        // framebuffer-only (unreadable) and `nextDrawable` can block when both are in flight.
+        if viewport_size.width.0 <= 0 || viewport_size.height.0 <= 0 {
+            anyhow::bail!("render_to_image: the window has no size yet");
+        }
+        let descriptor = metal::TextureDescriptor::new();
+        descriptor.set_width(viewport_size.width.0 as u64);
+        descriptor.set_height(viewport_size.height.0 as u64);
+        descriptor.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
+        descriptor.set_storage_mode(metal::MTLStorageMode::Managed);
+        descriptor
+            .set_usage(metal::MTLTextureUsage::RenderTarget | metal::MTLTextureUsage::ShaderRead);
+        let target = self.shared.device.new_texture(&descriptor);
 
         loop {
             let mut instance_buffer = self
@@ -497,7 +514,7 @@ impl MetalRenderer {
                 self.layer.is_opaque(),
                 scene,
                 &mut instance_buffer,
-                drawable,
+                &target,
                 viewport_size,
             );
 
@@ -513,12 +530,15 @@ impl MetalRenderer {
                     let block = block.copy();
                     command_buffer.add_completed_handler(&block);
 
-                    // Commit and wait for completion without presenting
+                    // Make the GPU's pixels readable, then commit and wait (nothing is presented).
+                    let blit = command_buffer.new_blit_command_encoder();
+                    blit.synchronize_resource(&target);
+                    blit.end_encoding();
                     command_buffer.commit();
                     command_buffer.wait_until_completed();
 
                     // Read pixels from the texture
-                    let texture = drawable.texture();
+                    let texture: &metal::TextureRef = &target;
                     let width = texture.width() as u32;
                     let height = texture.height() as u32;
                     let bytes_per_row = width as usize * 4;
@@ -585,8 +605,10 @@ impl SurfaceRenderer {
             // On macOS, disable drawable timeout to prevent frame drops during compositing.
             // On iOS, MUST allow timeout — blocking nextDrawable on the main thread
             // (where CADisplayLink fires) deadlocks the run loop.
+            // yeti: with two drawables (see above), a stalled compositor could block
+            // `nextDrawable` indefinitely; let it time out (one second) and drop that frame.
             #[cfg(target_os = "macos")]
-            let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: NO];
+            let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: YES];
             #[cfg(target_os = "ios")]
             let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: YES];
             let _: () = msg_send![&*layer, setNeedsDisplayOnBoundsChange: YES];
@@ -630,6 +652,10 @@ impl SurfaceRenderer {
             ];
         }
         // yeti: the path textures are made when a frame first draws paths (see PathTextureLife).
+        // The window re-syncs its size after every frame: keep them while it is unchanged.
+        if self.path_textures.size == size {
+            return;
+        }
         self.path_textures.size = size;
         self.path_intermediate_texture = None;
         self.path_intermediate_msaa_texture = None;
@@ -785,7 +811,7 @@ fn draw_scene(
             layer.is_opaque(),
             scene,
             &mut instance_buffer,
-            drawable,
+            drawable.texture(),
             viewport_size,
         );
 
@@ -839,7 +865,7 @@ fn draw_primitives(
     is_opaque: bool,
     scene: &Scene,
     instance_buffer: &mut InstanceBuffer,
-    drawable: &metal::MetalDrawableRef,
+    target: &metal::TextureRef,
     viewport_size: Size<DevicePixels>,
 ) -> Result<metal::CommandBuffer> {
     let command_queue = shared.command_queue.clone();
@@ -849,7 +875,7 @@ fn draw_primitives(
 
     let mut command_encoder = new_command_encoder(
         command_buffer,
-        drawable,
+        target,
         viewport_size,
         |color_attachment| {
             color_attachment.set_load_action(metal::MTLLoadAction::Clear);
@@ -892,7 +918,7 @@ fn draw_primitives(
 
                 command_encoder = new_command_encoder(
                     command_buffer,
-                    drawable,
+                    target,
                     viewport_size,
                     |color_attachment| {
                         color_attachment.set_load_action(metal::MTLLoadAction::Load);
@@ -1623,7 +1649,7 @@ fn draw_surfaces_batch(
 
 fn new_command_encoder<'a>(
     command_buffer: &'a metal::CommandBufferRef,
-    drawable: &'a metal::MetalDrawableRef,
+    target: &'a metal::TextureRef,
     viewport_size: Size<DevicePixels>,
     configure_color_attachment: impl Fn(&RenderPassColorAttachmentDescriptorRef),
 ) -> &'a metal::RenderCommandEncoderRef {
@@ -1632,7 +1658,7 @@ fn new_command_encoder<'a>(
         .color_attachments()
         .object_at(0)
         .unwrap();
-    color_attachment.set_texture(Some(drawable.texture()));
+    color_attachment.set_texture(Some(target));
     color_attachment.set_store_action(metal::MTLStoreAction::Store);
     configure_color_attachment(color_attachment);
 

@@ -1115,7 +1115,8 @@ impl Drop for MacWindow {
             let window = this.native_window;
             let sheet_parent = this.sheet_parent.take();
             let foreground_executor = this.foreground_executor.clone();
-            this.display_link.take();
+            // yeti: also clears a parked link, so a late frame waker can't restart it.
+            this.stop_display_link();
             unsafe {
                 this.native_window.setDelegate_(nil);
             }
@@ -2647,7 +2648,11 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
                 lock.renderer.set_presents_with_transaction(true);
                 lock.stop_display_link();
                 drop(lock);
-                callback(Default::default());
+                callback(RequestFrameOptions {
+                    // yeti: a synchronous frame (resize, activation) must not be held by frame caps.
+                    require_presentation: true,
+                    ..Default::default()
+                });
 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
@@ -2786,7 +2791,11 @@ extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
         drop(lock);
-        callback(Default::default());
+        callback(RequestFrameOptions {
+            // yeti: a synchronous frame (resize, activation) must not be held by frame caps.
+            require_presentation: true,
+            ..Default::default()
+        });
 
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);

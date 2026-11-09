@@ -90,6 +90,8 @@ struct RubberBand {
     velocity: f32,
     last_input: Option<std::time::Instant>,
     released: bool,
+    /// Scroll the band took back during this frame (reset as each frame is laid out).
+    taken_back: f32,
     at: Option<std::time::Instant>,
 }
 
@@ -754,7 +756,7 @@ impl StateInner {
         scroll_top: &ListOffset,
         height: Pixels,
         mut delta: Point<Pixels>,
-        trackpad: Option<TouchPhase>,
+        trackpad: Option<(TouchPhase, Pixels)>,
         current_view: EntityId,
         window: &mut Window,
         cx: &mut App,
@@ -771,29 +773,47 @@ impl StateInner {
 
         // yeti: rubber band. A pull already past an end is taken back first; what goes past an
         // end now stretches it, with resistance.
-        if let (true, Some(phase)) = (self.rubber_band, trackpad) {
-            let current = self.scroll_top(scroll_top);
+        if let (true, Some((phase, event_dy))) = (self.rubber_band, trackpad) {
+            // `delta` is this frame's accumulated scroll (positions are recomputed from the
+            // frame's scroll top each event), so the band moves by this event's share only, and
+            // what it took back this frame comes off the accumulated scroll. A bottom-aligned
+            // list shorter than its viewport has a negative scroll top: clamp it.
+            let current = self.scroll_top(scroll_top).clamp(px(0.), scroll_max);
             let band = &mut self.band;
-            let dy = f32::from(delta.y);
-            if band.offset != 0. && band.offset.signum() != dy.signum() {
+            if matches!(phase, TouchPhase::Started) {
+                band.released = false;
+            }
+            let dy = f32::from(event_dy);
+            if band.offset != 0. && dy != 0. && band.offset.signum() != dy.signum() {
+                // Pulling back from a stretch: undo the band first, then scroll the rest.
                 let back = dy.abs().min(band.offset.abs()) * dy.signum();
                 band.offset += back;
-                delta.y -= px(back);
+                band.taken_back += back;
+            } else if !band.released {
+                // Momentum after the fingers lift doesn't stretch further; it springs back.
+                let before = current - (delta.y - event_dy) + px(band.taken_back);
+                let after = current - delta.y + px(band.taken_back);
+                let beyond = |y: Pixels| {
+                    if y < px(0.) {
+                        f32::from(-y)
+                    } else if y > scroll_max {
+                        -f32::from(y - scroll_max)
+                    } else {
+                        0.
+                    }
+                };
+                let past = beyond(after) - beyond(before);
+                if past != 0. {
+                    let room = 1. - (band.offset.abs() / RubberBand::MAX).min(1.);
+                    band.offset =
+                        (band.offset + past * 0.4 * room).clamp(-RubberBand::MAX, RubberBand::MAX);
+                }
             }
-            let unclamped = current - delta.y;
-            let past = if unclamped < px(0.) {
-                f32::from(-unclamped)
-            } else if unclamped > scroll_max {
-                -f32::from(unclamped - scroll_max)
-            } else {
-                0.
-            };
-            if past != 0. {
-                let room = 1. - (band.offset.abs() / RubberBand::MAX).min(1.);
-                band.offset = (band.offset + past * 0.4 * room).clamp(-RubberBand::MAX, RubberBand::MAX);
-            }
+            delta.y -= px(band.taken_back);
             band.last_input = Some(std::time::Instant::now());
-            band.released = matches!(phase, TouchPhase::Ended);
+            if matches!(phase, TouchPhase::Ended) {
+                band.released = true;
+            }
             band.velocity = 0.;
             if band.offset != 0. {
                 cx.notify(current_view);
@@ -1156,6 +1176,26 @@ impl StateInner {
                 let band = self.step_rubber_band(window);
                 let mut item_origin = bounds.origin + Point::new(px(0.), padding.top + lag + band);
                 item_origin.y -= layout_response.scroll_top.offset_in_item;
+                // yeti: painting the rows low for the tail glide opens a strip at the top; lay out
+                // the rows above the first one until it is covered.
+                if lag > px(0.) {
+                    let item_space = size(bounds.size.width.into(), AvailableSpace::MinContent);
+                    let mut first_ix = layout_response
+                        .item_layouts
+                        .front()
+                        .map_or(self.items.summary().count, |item| item.index);
+                    while item_origin.y > bounds.top() && first_ix > 0 {
+                        first_ix -= 1;
+                        let mut element = render_item(first_ix, window, cx);
+                        let size = element.layout_as_root(item_space, window, cx);
+                        item_origin.y -= size.height;
+                        layout_response.item_layouts.push_front(ItemLayout {
+                            index: first_ix,
+                            element,
+                            size,
+                        });
+                    }
+                }
                 for item in &mut layout_response.item_layouts {
                     window.with_content_mask(Some(ContentMask { bounds }), |window| {
                         item.element.prepaint_at(item_origin, window, cx);
@@ -1215,6 +1255,7 @@ impl StateInner {
     /// yeti: the rubber band's offset for this frame, springing back once input has stopped.
     fn step_rubber_band(&mut self, window: &mut Window) -> Pixels {
         let band = &mut self.band;
+        band.taken_back = 0.;
         if !self.rubber_band || band.offset == 0. {
             band.at = None;
             return px(0.);
@@ -1260,14 +1301,20 @@ impl StateInner {
             glide.velocity = 0.;
         } else if let Some(prev) = glide.last_height
             && prev > px(0.)
-            && count >= glide.last_count
+            && count > glide.last_count
             && height > prev
         {
+            // New rows only: a re-wrap (resize) or an image loading changes height in place.
             glide.lag = (glide.lag + f32::from(height - prev)).min(max_lag);
         }
         glide.last_height = Some(height);
         glide.last_count = count;
 
+        if glide.lag <= 0. {
+            // Idle: the next glide's first step must not count the idle time as elapsed.
+            glide.at = None;
+            return px(0.);
+        }
         let now = std::time::Instant::now();
         let dt = glide
             .at
@@ -1508,7 +1555,10 @@ impl Element for List {
             if phase == DispatchPhase::Bubble && hitbox_id.should_handle_scroll(window) {
                 accumulated_scroll_delta = accumulated_scroll_delta.coalesce(event.delta);
                 let pixel_delta = accumulated_scroll_delta.pixel_delta(px(20.));
-                let trackpad = event.delta.precise().then_some(event.touch_phase);
+                let trackpad = event
+                    .delta
+                    .precise()
+                    .then(|| (event.touch_phase, event.delta.pixel_delta(px(20.)).y));
                 list_state.0.borrow_mut().scroll(
                     &scroll_top,
                     height,
