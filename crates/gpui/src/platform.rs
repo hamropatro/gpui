@@ -201,6 +201,10 @@ pub trait Platform: 'static {
     fn on_validate_app_menu_command(&self, callback: Box<dyn FnMut(&dyn Action) -> bool>);
 
     fn thermal_state(&self) -> ThermalState;
+    /// yeti: whether the system asks apps to save power (macOS Low Power Mode).
+    fn low_power_mode(&self) -> bool {
+        false
+    }
     fn on_thermal_state_change(&self, callback: Box<dyn FnMut()>);
 
     fn compositor_name(&self) -> &'static str {
@@ -652,6 +656,14 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn toggle_fullscreen(&self);
     fn is_fullscreen(&self) -> bool;
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>);
+    /// yeti: a frame finished; `active` is false when it drew, presented and scheduled nothing.
+    /// A platform may stop its frame source after a few idle frames (see `frame_waker`).
+    fn note_frame_activity(&self, _active: bool) {}
+    /// yeti: restarts a stopped frame source; GPUI calls it whenever the window needs a frame
+    /// (a view was notified, a refresh, or a next-frame callback was queued).
+    fn frame_waker(&self) -> Option<std::rc::Rc<dyn Fn()>> {
+        None
+    }
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> DispatchEventResult>);
     fn on_active_status_change(&self, callback: Box<dyn FnMut(bool)>);
     fn on_hover_status_change(&self, callback: Box<dyn FnMut(bool)>);

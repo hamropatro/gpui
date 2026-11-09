@@ -908,6 +908,18 @@ impl Platform for MacPlatform {
         self.0.lock().on_thermal_state_change = Some(callback);
     }
 
+    fn low_power_mode(&self) -> bool {
+        unsafe {
+            let process_info: id = msg_send![class!(NSProcessInfo), processInfo];
+            let responds: BOOL = msg_send![process_info, respondsToSelector: sel!(isLowPowerModeEnabled)];
+            if responds == NO {
+                return false;
+            }
+            let enabled: BOOL = msg_send![process_info, isLowPowerModeEnabled];
+            enabled == YES
+        }
+    }
+
     fn thermal_state(&self) -> ThermalState {
         unsafe {
             let process_info: id = msg_send![class!(NSProcessInfo), processInfo];

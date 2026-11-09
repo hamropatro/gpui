@@ -541,6 +541,29 @@ impl LineLayoutCache {
         Text: AsRef<str>,
         SharedString: From<Text>,
     {
+        self.layout_line_with(text, font_size, runs, force_width, SharedString::from)
+    }
+
+    /// yeti: like `layout_line` for borrowed text, which is copied only on a cache miss (a hit,
+    /// the usual case, copies nothing). After Zed's "don't copy the text of every shaped line".
+    pub fn layout_line_str(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+        force_width: Option<Pixels>,
+    ) -> Arc<LineLayout> {
+        self.layout_line_with(text, font_size, runs, force_width, SharedString::new)
+    }
+
+    fn layout_line_with<Text: AsRef<str>>(
+        &self,
+        text: Text,
+        font_size: Pixels,
+        runs: &[FontRun],
+        force_width: Option<Pixels>,
+        owned: impl FnOnce(Text) -> SharedString,
+    ) -> Arc<LineLayout> {
         let key = &CacheKeyRef {
             text: text.as_ref(),
             font_size,
@@ -560,7 +583,7 @@ impl LineLayoutCache {
             current_frame.used_lines.push(key);
             layout
         } else {
-            let text = SharedString::from(text);
+            let text = owned(text);
             let mut layout = self
                 .platform_text_system
                 .layout_line(&text, font_size, runs);

@@ -457,7 +457,8 @@ impl WindowTextSystem {
         let mut process_line = |line_text: SharedString, line_start, line_end| {
             font_runs.clear();
 
-            let mut decoration_runs = <Vec<DecorationRun>>::with_capacity(32);
+            // yeti (from Zed): no 32-run reservation per line; most lines have one or two runs.
+            let mut decoration_runs = <Vec<DecorationRun>>::new();
             let mut run_start = line_start;
             while run_start < line_end {
                 let Some(run) = runs.peek_mut() else {
@@ -614,12 +615,9 @@ impl WindowTextSystem {
             }
         }
 
-        let layout = self.line_layout_cache.layout_line(
-            &SharedString::new(text),
-            font_size,
-            &font_runs,
-            force_width,
-        );
+        let layout =
+            self.line_layout_cache
+                .layout_line_str(text, font_size, &font_runs, force_width);
 
         self.font_runs_pool.lock().push(font_runs);
 

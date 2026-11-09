@@ -1191,6 +1191,11 @@ impl App {
         self.platform.thermal_state()
     }
 
+    /// yeti: whether the system asks apps to save power (macOS Low Power Mode).
+    pub fn low_power_mode(&self) -> bool {
+        self.platform.low_power_mode()
+    }
+
     /// Invokes a handler when the thermal state changes
     pub fn on_thermal_state_change<F>(&self, mut callback: F) -> Subscription
     where

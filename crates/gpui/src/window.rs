@@ -156,6 +156,8 @@ impl DispatchPhase {
 
 struct WindowInvalidatorInner {
     pub dirty: bool,
+    /// yeti: restarts the platform's frame source when the window needs a frame.
+    waker: Option<Rc<dyn Fn()>>,
     pub draw_phase: DrawPhase,
     pub dirty_views: FxHashSet<EntityId>,
 }
@@ -170,6 +172,7 @@ impl WindowInvalidator {
         WindowInvalidator {
             inner: Rc::new(RefCell::new(WindowInvalidatorInner {
                 dirty: true,
+                waker: None,
                 draw_phase: DrawPhase::None,
                 dirty_views: FxHashSet::default(),
             })),
@@ -181,10 +184,28 @@ impl WindowInvalidator {
         inner.dirty_views.insert(entity);
         if inner.draw_phase == DrawPhase::None {
             inner.dirty = true;
+            let waker = inner.waker.clone();
+            drop(inner);
             cx.push_effect(Effect::Notify { emitter: entity });
+            if let Some(waker) = waker {
+                waker();
+            }
             true
         } else {
             false
+        }
+    }
+
+    /// yeti: see `PlatformWindow::frame_waker`.
+    pub fn set_waker(&self, waker: Option<Rc<dyn Fn()>>) {
+        self.inner.borrow_mut().waker = waker;
+    }
+
+    /// yeti: asks the platform for a frame (restarting a stopped frame source).
+    pub fn wake(&self) {
+        let waker = self.inner.borrow().waker.clone();
+        if let Some(waker) = waker {
+            waker();
         }
     }
 
@@ -193,7 +214,10 @@ impl WindowInvalidator {
     }
 
     pub fn set_dirty(&self, dirty: bool) {
-        self.inner.borrow_mut().dirty = dirty
+        self.inner.borrow_mut().dirty = dirty;
+        if dirty {
+            self.wake();
+        }
     }
 
     pub fn set_phase(&self, phase: DrawPhase) {
@@ -988,6 +1012,10 @@ pub struct Window {
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
+    /// yeti: frame-time overlay (from Zed), painted straight into the scene when shown.
+    debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay,
+    /// yeti: `dispatch_synthetic_event` is running.
+    dispatching_synthetic: bool,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
@@ -1255,6 +1283,7 @@ impl Window {
         let appearance = platform_window.appearance();
         let text_system = Arc::new(WindowTextSystem::new(cx.text_system().clone()));
         let invalidator = WindowInvalidator::new();
+        invalidator.set_waker(platform_window.frame_waker());
         let active = Rc::new(Cell::new(platform_window.is_active()));
         let hovered = Rc::new(Cell::new(platform_window.is_hovered()));
         let needs_present = Rc::new(Cell::new(false));
@@ -1288,16 +1317,20 @@ impl Window {
             let active = active.clone();
             let needs_present = needs_present.clone();
             let next_frame_callbacks = next_frame_callbacks.clone();
+            let pending_callbacks = next_frame_callbacks.clone();
             let input_rate_tracker = input_rate_tracker.clone();
             move |request_frame_options| {
-                let thermal_state = cx.update(|cx| cx.thermal_state());
+                let (thermal_state, low_power) =
+                    cx.update(|cx| (cx.thermal_state(), cx.low_power_mode()));
 
-                let min_frame_interval = if !request_frame_options.force_render
-                    && !request_frame_options.require_presentation
-                    && next_frame_callbacks.borrow().is_empty()
+                // yeti: frame-rate caps apply to every redraw (a notified view, an animation),
+                // not only to forced frames: 30 fps for an inactive window or in Low Power Mode,
+                // 60 fps when the system is hot. Frames the platform requires are never held.
+                let min_frame_interval = if request_frame_options.force_render
+                    || request_frame_options.require_presentation
                 {
                     None
-                } else if !active.get() {
+                } else if !active.get() || low_power {
                     Some(Duration::from_micros(33333))
                 } else if matches!(
                     thermal_state,
@@ -1310,6 +1343,9 @@ impl Window {
 
                 let now = Instant::now();
                 if let Some(min_interval) = min_frame_interval {
+                    // A little slack for refresh jitter: on a 120 Hz display a strict 16.67 ms
+                    // test often skips one extra refresh, turning a 60 fps cap into 40 fps.
+                    let min_interval = min_interval.saturating_sub(Duration::from_millis(2));
                     if let Some(last_frame) = last_frame_time.get()
                         && now.duration_since(last_frame) < min_interval
                     {
@@ -1343,7 +1379,8 @@ impl Window {
                     || needs_present.get()
                     || (active.get() && input_rate_tracker.borrow_mut().is_high_rate());
 
-                if invalidator.is_dirty() || request_frame_options.force_render {
+                let drew = invalidator.is_dirty() || request_frame_options.force_render;
+                if drew {
                     measure("frame duration", || {
                         handle
                             .update(&mut cx, |_, window, cx| {
@@ -1360,9 +1397,16 @@ impl Window {
                 } else {
                 }
 
+                // yeti: an idle frame drew, presented and scheduled nothing; the platform may
+                // then stop its frame source until the window needs a frame again.
+                let frame_active = drew
+                    || needs_present
+                    || invalidator.is_dirty()
+                    || !pending_callbacks.borrow().is_empty();
                 handle
                     .update(&mut cx, |_, window, _| {
                         window.complete_frame();
+                        window.platform_window.note_frame_activity(frame_active);
                     })
                     .log_err();
             }
@@ -1663,6 +1707,8 @@ impl Window {
             element_opacity: 1.0,
             requested_autoscroll: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            debug_frame_overlay: crate::debug_overlay::DebugFrameOverlay::new(),
+            dispatching_synthetic: false,
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
@@ -2135,6 +2181,7 @@ impl Window {
     /// Schedule the given closure to be run directly after the current frame is rendered.
     pub fn on_next_frame(&self, callback: impl FnOnce(&mut Window, &mut App) + 'static) {
         RefCell::borrow_mut(&self.next_frame_callbacks).push(Box::new(callback));
+        self.invalidator.wake();
     }
 
     /// Schedule a frame to be drawn on the next animation frame.
@@ -2220,6 +2267,58 @@ impl Window {
     pub fn render_to_image(&self) -> anyhow::Result<image::RgbaImage> {
         self.platform_window
             .render_to_image(&self.rendered_frame.scene)
+    }
+
+    /// yeti: draws a fresh frame (running pending next-frame callbacks) and returns its pixels
+    /// as RGBA, without presenting it. Works while the window is off screen, covered or the
+    /// screen is locked; used by the app's scripted UI driver for screenshots.
+    pub fn render_offscreen(&mut self, cx: &mut App) -> anyhow::Result<image::RgbaImage> {
+        let arena_clear_needed = self.draw_frame_now(cx);
+        let image = self.platform_window.render_to_image(&self.rendered_frame.scene);
+        arena_clear_needed.clear();
+        image
+    }
+
+    /// yeti: runs pending next-frame callbacks and draws a new frame now (not presented).
+    /// For benchmarks that time one frame per input.
+    pub fn draw_frame_now(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        let callbacks = self.next_frame_callbacks.take();
+        for callback in callbacks {
+            callback(self, cx);
+        }
+        let arena_clear_needed = self.draw(cx);
+        // The new frame is drawn but not presented: wake the platform so it presents it (and
+        // the screen matches the hit-testing state, which follows `rendered_frame`).
+        self.invalidator.wake();
+        arena_clear_needed
+    }
+
+    /// yeti: the frame-time overlay's mode (from Zed's debug overlay).
+    pub fn debug_frame_overlay_mode(&self) -> crate::DebugFrameOverlayMode {
+        self.debug_frame_overlay.mode()
+    }
+
+    /// yeti: shows, details or hides the frame-time overlay, and redraws.
+    pub fn set_debug_frame_overlay_mode(&mut self, mode: crate::DebugFrameOverlayMode) {
+        self.debug_frame_overlay.set_mode(mode);
+        self.refresh();
+    }
+
+    /// yeti: steps the frame-time overlay through hidden, frame time, and detailed.
+    pub fn cycle_debug_frame_overlay_mode(&mut self) {
+        self.set_debug_frame_overlay_mode(self.debug_frame_overlay.mode().next());
+    }
+
+    /// yeti: clears the frame-time overlay's statistics (keeps the frame count), and redraws.
+    pub fn reset_debug_frame_overlay_stats(&mut self) {
+        self.debug_frame_overlay.reset_stats();
+        self.refresh();
+    }
+
+    /// yeti: whether a frame is wanted: something was invalidated since the last frame was
+    /// drawn, or a next-frame callback (an animation, `on_next_frame`) is waiting.
+    pub fn needs_draw(&self) -> bool {
+        self.invalidator.is_dirty() || !self.next_frame_callbacks.borrow().is_empty()
     }
 
     /// Set the content size of the window.
@@ -2699,6 +2798,7 @@ impl Window {
         // Set up the per-App arena for element allocation during this draw.
         // This ensures that multiple test Apps have isolated arenas.
         let _arena_scope = ElementArenaScope::enter(&cx.element_arena);
+        let draw_started = std::time::Instant::now();
 
         self.invalidate_entities();
         cx.entities.clear_accessed();
@@ -2716,6 +2816,9 @@ impl Window {
             {
                 self.draw_surfaces(cx);
             }
+            let (viewport_size, scale_factor) = (self.viewport_size, self.scale_factor());
+            self.debug_frame_overlay
+                .paint(&mut self.next_frame.scene, viewport_size, scale_factor);
         }
         self.dirty_views.clear();
         self.next_frame.window_active = self.active.get();
@@ -2770,6 +2873,9 @@ impl Window {
         self.refreshing = false;
         self.invalidator.set_phase(DrawPhase::None);
         self.needs_present.set(true);
+        if self.debug_frame_overlay.is_enabled() {
+            self.debug_frame_overlay.record_frame(draw_started.elapsed());
+        }
 
         ArenaClearNeeded::new(&cx.element_arena)
     }
@@ -4133,11 +4239,13 @@ impl Window {
     }
 
     fn should_use_subpixel_rendering(&self, font_id: FontId, font_size: Pixels) -> bool {
-        if self.platform_window.background_appearance() != WindowBackgroundAppearance::Opaque {
+        // yeti (from Zed): checked first because it's cheap, while some platforms lock the window
+        // to read its background appearance, and this runs for every glyph.
+        if !self.platform_window.is_subpixel_rendering_supported() {
             return false;
         }
 
-        if !self.platform_window.is_subpixel_rendering_supported() {
+        if self.platform_window.background_appearance() != WindowBackgroundAppearance::Opaque {
             return false;
         }
 
@@ -4765,6 +4873,20 @@ impl Window {
             .unwrap_or_else(|| action.name().to_string())
     }
 
+    /// yeti: dispatches an event the app made itself (e.g. a slice of a smoothed wheel scroll).
+    /// It is handled like `dispatch_event`, but doesn't count as user input for the input-rate
+    /// tracker, which would keep the window presenting for a second after it.
+    pub fn dispatch_synthetic_event(
+        &mut self,
+        event: PlatformInput,
+        cx: &mut App,
+    ) -> DispatchEventResult {
+        let was = std::mem::replace(&mut self.dispatching_synthetic, true);
+        let result = self.dispatch_event(event, cx);
+        self.dispatching_synthetic = was;
+        result
+    }
+
     /// Dispatch a mouse or keyboard event on the window.
     #[profiling::function]
     pub fn dispatch_event(&mut self, event: PlatformInput, cx: &mut App) -> DispatchEventResult {
@@ -4886,7 +5008,7 @@ impl Window {
             self.captured_hitbox = None;
         }
 
-        if self.invalidator.is_dirty() {
+        if self.invalidator.is_dirty() && !self.dispatching_synthetic {
             self.input_rate_tracker.borrow_mut().record_input();
         }
 

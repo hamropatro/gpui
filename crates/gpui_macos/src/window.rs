@@ -430,6 +430,10 @@ pub(crate) struct MacWindowState {
     background_appearance: WindowBackgroundAppearance,
     background_color: Option<Hsla>,
     display_link: Option<DisplayLink>,
+    /// yeti: frames in a row that drew, presented and scheduled nothing.
+    idle_frames: u32,
+    /// yeti: when the display link was stopped for lack of work (it restarts on demand).
+    link_parked_at: Option<std::time::Instant>,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     pub(crate) event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -509,6 +513,7 @@ impl MacWindowState {
 
     fn start_display_link(&mut self) {
         self.stop_display_link();
+        self.idle_frames = 0;
         unsafe {
             if !self
                 .native_window
@@ -529,6 +534,36 @@ impl MacWindowState {
 
     fn stop_display_link(&mut self) {
         self.display_link = None;
+        self.link_parked_at = None;
+    }
+
+    /// yeti: stops the display link after a few idle frames, so an idle window costs no
+    /// per-refresh wakeups (up to 120 a second); `wake_display_link` restarts it.
+    fn park_display_link_if_idle(&mut self) {
+        const PARK_AFTER_IDLE_FRAMES: u32 = 3;
+        if self.idle_frames < PARK_AFTER_IDLE_FRAMES || self.link_parked_at.is_some() {
+            return;
+        }
+        if let Some(display_link) = self.display_link.as_mut()
+            && display_link.stop().log_err().is_some()
+        {
+            self.link_parked_at = Some(std::time::Instant::now());
+        }
+    }
+
+    /// yeti: restarts a parked display link. One parked for a long time (e.g. across system
+    /// sleep or a display change) is recreated rather than resumed.
+    fn wake_display_link(&mut self) {
+        const RECREATE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+        self.idle_frames = 0;
+        let Some(parked_at) = self.link_parked_at.take() else { return };
+        if parked_at.elapsed() > RECREATE_AFTER {
+            self.start_display_link();
+        } else if let Some(display_link) = self.display_link.as_mut()
+            && display_link.start().log_err().is_none()
+        {
+            self.start_display_link();
+        }
     }
 
     fn is_maximized(&self) -> bool {
@@ -764,6 +799,8 @@ impl MacWindow {
                 background_appearance: WindowBackgroundAppearance::Opaque,
                 background_color: None,
                 display_link: None,
+                idle_frames: 0,
+                link_parked_at: None,
                 renderer: renderer::new_renderer(
                     renderer_context,
                     native_window as *mut _,
@@ -1078,7 +1115,8 @@ impl Drop for MacWindow {
             let window = this.native_window;
             let sheet_parent = this.sheet_parent.take();
             let foreground_executor = this.foreground_executor.clone();
-            this.display_link.take();
+            // yeti: also clears a parked link, so a late frame waker can't restart it.
+            this.stop_display_link();
             unsafe {
                 this.native_window.setDelegate_(nil);
             }
@@ -1614,6 +1652,31 @@ impl PlatformWindow for MacWindow {
 
     fn on_request_frame(&self, callback: Box<dyn FnMut(RequestFrameOptions)>) {
         self.0.as_ref().lock().request_frame_callback = Some(callback);
+    }
+
+    fn note_frame_activity(&self, active: bool) {
+        // Called from inside the frame callback, when the state lock is free.
+        if let Some(mut lock) = self.0.try_lock() {
+            lock.idle_frames = if active { 0 } else { lock.idle_frames.saturating_add(1) };
+        }
+    }
+
+    fn frame_waker(&self) -> Option<std::rc::Rc<dyn Fn()>> {
+        let weak = Arc::downgrade(&self.0);
+        let executor = self.0.lock().foreground_executor.clone();
+        Some(std::rc::Rc::new(move || {
+            let Some(state) = weak.upgrade() else { return };
+            if let Some(mut lock) = state.try_lock() {
+                lock.wake_display_link();
+                return;
+            }
+            // The lock is held further up this call (inside an AppKit callback): wake right after.
+            executor
+                .spawn(async move {
+                    state.lock().wake_display_link();
+                })
+                .detach();
+        }))
     }
 
     fn on_input(&self, callback: Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>) {
@@ -2585,7 +2648,11 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
                 lock.renderer.set_presents_with_transaction(true);
                 lock.stop_display_link();
                 drop(lock);
-                callback(Default::default());
+                callback(RequestFrameOptions {
+                    // yeti: a synchronous frame (resize, activation) must not be held by frame caps.
+                    require_presentation: true,
+                    ..Default::default()
+                });
 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
@@ -2724,7 +2791,11 @@ extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
         drop(lock);
-        callback(Default::default());
+        callback(RequestFrameOptions {
+            // yeti: a synchronous frame (resize, activation) must not be held by frame caps.
+            require_presentation: true,
+            ..Default::default()
+        });
 
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
@@ -2749,6 +2820,7 @@ extern "C" fn step(view: *mut c_void) {
         // Sync renderer drawable size in case setFrameSize: was deferred
         sync_renderer_drawable_size(&mut lock);
         lock.request_frame_callback = Some(callback);
+        lock.park_display_link_if_idle();
         drop(lock);
         flush_pending_resize_callback(&window_state, "step");
     }
