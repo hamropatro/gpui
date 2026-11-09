@@ -2222,6 +2222,31 @@ impl Window {
             .render_to_image(&self.rendered_frame.scene)
     }
 
+    /// yeti: draws a fresh frame (running pending next-frame callbacks) and returns its pixels
+    /// as RGBA, without presenting it. Works while the window is off screen, covered or the
+    /// screen is locked; used by the app's scripted UI driver for screenshots.
+    pub fn render_offscreen(&mut self, cx: &mut App) -> anyhow::Result<image::RgbaImage> {
+        let arena_clear_needed = self.draw_frame_now(cx);
+        let image = self.platform_window.render_to_image(&self.rendered_frame.scene);
+        arena_clear_needed.clear();
+        image
+    }
+
+    /// yeti: runs pending next-frame callbacks and draws a new frame now (not presented).
+    /// For benchmarks that time one frame per input.
+    pub fn draw_frame_now(&mut self, cx: &mut App) -> ArenaClearNeeded {
+        let callbacks = self.next_frame_callbacks.take();
+        for callback in callbacks {
+            callback(self, cx);
+        }
+        self.draw(cx)
+    }
+
+    /// yeti: whether something was invalidated since the last frame was drawn.
+    pub fn needs_draw(&self) -> bool {
+        self.invalidator.is_dirty()
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);

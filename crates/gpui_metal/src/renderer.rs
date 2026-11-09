@@ -151,6 +151,7 @@ pub struct MetalRenderer {
     presents_with_transaction: bool,
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
+    path_textures: PathTextureLife,
 }
 
 /// A lightweight renderer for secondary GPUI surfaces. Shares GPU resources
@@ -161,6 +162,7 @@ pub struct SurfaceRenderer {
     layer: metal::MetalLayer,
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
+    path_textures: PathTextureLife,
 }
 
 #[repr(C)]
@@ -374,6 +376,7 @@ impl MetalRenderer {
             presents_with_transaction: false,
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
+            path_textures: PathTextureLife::default(),
         }
     }
 
@@ -425,14 +428,10 @@ impl MetalRenderer {
             width: DevicePixels(cg_size.width as i32),
             height: DevicePixels(cg_size.height as i32),
         };
-        update_path_intermediate_textures(
-            &self.shared.device,
-            self.shared.path_sample_count,
-            &mut self.path_intermediate_texture,
-            &mut self.path_intermediate_msaa_texture,
-            self.shared.is_apple_gpu,
-            device_pixels_size,
-        );
+        // yeti: the path textures are made when a frame first draws paths (see PathTextureLife).
+        self.path_textures.size = device_pixels_size;
+        self.path_intermediate_texture = None;
+        self.path_intermediate_msaa_texture = None;
     }
 
     pub fn update_transparency(&self, transparent: bool) {
@@ -444,6 +443,12 @@ impl MetalRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        self.path_textures.prepare(
+            &self.shared,
+            scene,
+            &mut self.path_intermediate_texture,
+            &mut self.path_intermediate_msaa_texture,
+        );
         draw_scene(
             &self.shared,
             &self.layer,
@@ -458,6 +463,12 @@ impl MetalRenderer {
     /// This does not present the frame to screen - useful for visual testing
     /// where we want to capture what would be rendered without displaying it.
     pub fn render_to_image(&mut self, scene: &Scene) -> Result<RgbaImage> {
+        self.path_textures.prepare(
+            &self.shared,
+            scene,
+            &mut self.path_intermediate_texture,
+            &mut self.path_intermediate_msaa_texture,
+        );
         let layer = self.layer.clone();
         let viewport_size = layer.drawable_size();
         let viewport_size: Size<DevicePixels> = size(
@@ -589,6 +600,7 @@ impl SurfaceRenderer {
             layer,
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
+            path_textures: PathTextureLife::default(),
         }
     }
 
@@ -611,14 +623,10 @@ impl SurfaceRenderer {
                 setDrawableSize: cg_size
             ];
         }
-        update_path_intermediate_textures(
-            &self.shared.device,
-            self.shared.path_sample_count,
-            &mut self.path_intermediate_texture,
-            &mut self.path_intermediate_msaa_texture,
-            self.shared.is_apple_gpu,
-            size,
-        );
+        // yeti: the path textures are made when a frame first draws paths (see PathTextureLife).
+        self.path_textures.size = size;
+        self.path_intermediate_texture = None;
+        self.path_intermediate_msaa_texture = None;
     }
 
     pub fn update_transparency(&self, transparent: bool) {
@@ -626,6 +634,12 @@ impl SurfaceRenderer {
     }
 
     pub fn draw(&mut self, scene: &Scene) {
+        self.path_textures.prepare(
+            &self.shared,
+            scene,
+            &mut self.path_intermediate_texture,
+            &mut self.path_intermediate_msaa_texture,
+        );
         draw_scene(
             &self.shared,
             &self.layer,
@@ -640,6 +654,52 @@ impl SurfaceRenderer {
 // =============================================================================
 // Shared rendering functions used by both MetalRenderer and SurfaceRenderer
 // =============================================================================
+
+/// yeti: the two window-sized path textures (the intermediate one, about 20 MB at 2880×1800,
+/// and the MSAA one) exist only while frames draw paths: made on the first frame with paths,
+/// dropped once no frame has drawn a path for a second, and dropped on resize. Most frames
+/// draw no paths at all. (After quiet.md's renderer patch.)
+#[derive(Default)]
+struct PathTextureLife {
+    size: Size<DevicePixels>,
+    last_used: Option<std::time::Instant>,
+}
+
+impl PathTextureLife {
+    const KEEP: std::time::Duration = std::time::Duration::from_secs(1);
+
+    fn prepare(
+        &mut self,
+        shared: &SharedRenderResources,
+        scene: &Scene,
+        texture: &mut Option<metal::Texture>,
+        msaa_texture: &mut Option<metal::Texture>,
+    ) {
+        let now = std::time::Instant::now();
+        if scene.paths.is_empty() {
+            if self
+                .last_used
+                .is_none_or(|t| now.duration_since(t) > Self::KEEP)
+            {
+                *texture = None;
+                *msaa_texture = None;
+                self.last_used = None;
+            }
+            return;
+        }
+        self.last_used = Some(now);
+        if texture.is_none() {
+            update_path_intermediate_textures(
+                &shared.device,
+                shared.path_sample_count,
+                texture,
+                msaa_texture,
+                shared.is_apple_gpu,
+                self.size,
+            );
+        }
+    }
+}
 
 fn update_path_intermediate_textures(
     device: &metal::Device,

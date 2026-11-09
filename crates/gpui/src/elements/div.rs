@@ -2707,6 +2707,20 @@ impl Interactivity {
                             delta_y = delta.x;
                         }
                     }
+                    // yeti: on a trackpad, a container that scrolls on one axis only takes
+                    // gestures that lean its way. Otherwise the small sideways drift of a
+                    // vertical swipe slid a horizontal strip while the page scrolled (the lock
+                    // below never fires: the other axis' delta is zero). A mouse wheel (line
+                    // deltas) still scrolls a sideways strip. (After quiet.md's div.rs patch.)
+                    let one_axis =
+                        (overflow.x == Overflow::Scroll) != (overflow.y == Overflow::Scroll);
+                    if one_axis && matches!(event.delta, crate::ScrollDelta::Pixels(_)) {
+                        if delta.x.abs() > delta.y.abs() {
+                            delta_y = Pixels::ZERO;
+                        } else {
+                            delta_x = Pixels::ZERO;
+                        }
+                    }
                     if !allow_concurrent_scroll && !delta_x.is_zero() && !delta_y.is_zero() {
                         if delta_x.abs() > delta_y.abs() {
                             delta_y = Pixels::ZERO;
