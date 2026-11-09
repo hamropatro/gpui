@@ -23,8 +23,11 @@ impl MetalAtlas {
         }))
     }
 
-    pub fn metal_texture(&self, id: AtlasTextureId) -> metal::Texture {
-        self.0.lock().texture(id).metal_texture.clone()
+    /// yeti: `None` when the texture was freed (its last image was evicted) while a frame that
+    /// still draws it is replayed (cached views) or re-presented: the caller skips that batch
+    /// for this frame instead of panicking; the next real draw reloads the image.
+    pub fn metal_texture(&self, id: AtlasTextureId) -> Option<metal::Texture> {
+        self.0.lock().texture(id).map(|t| t.metal_texture.clone())
     }
 }
 
@@ -52,7 +55,9 @@ impl PlatformAtlas for MetalAtlas {
             let tile = lock
                 .allocate(size, key.texture_kind())
                 .context("failed to allocate")?;
-            let texture = lock.texture(tile.texture_id);
+            let texture = lock
+                .texture(tile.texture_id)
+                .context("allocated tile has no texture")?;
             texture.upload(tile.bounds, &bytes);
             lock.tiles_by_key.insert(key.clone(), tile.clone());
             Ok(Some(tile))
@@ -190,13 +195,13 @@ impl MetalAtlasState {
         .unwrap()
     }
 
-    fn texture(&self, id: AtlasTextureId) -> &MetalAtlasTexture {
+    fn texture(&self, id: AtlasTextureId) -> Option<&MetalAtlasTexture> {
         let textures = match id.kind {
             gpui::AtlasTextureKind::Monochrome => &self.monochrome_textures,
             gpui::AtlasTextureKind::Polychrome => &self.polychrome_textures,
-            gpui::AtlasTextureKind::Subpixel => unreachable!(),
+            gpui::AtlasTextureKind::Subpixel => return None,
         };
-        textures[id.index as usize].as_ref().unwrap()
+        textures.textures.get(id.index as usize)?.as_ref()
     }
 }
 
