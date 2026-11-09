@@ -1395,7 +1395,10 @@ fn draw_monochrome_sprites(
         return false;
     }
 
-    let texture = shared.sprite_atlas.metal_texture(texture_id);
+    let Some(texture) = shared.sprite_atlas.metal_texture(texture_id) else {
+        // The image was evicted after this frame was built: skip it (see `metal_texture`).
+        return true;
+    };
     let texture_size = size(
         DevicePixels(texture.width() as i32),
         DevicePixels(texture.height() as i32),
@@ -1460,7 +1463,10 @@ fn draw_polychrome_sprites(
     }
     align_offset(instance_offset);
 
-    let texture = shared.sprite_atlas.metal_texture(texture_id);
+    let Some(texture) = shared.sprite_atlas.metal_texture(texture_id) else {
+        // The image was evicted after this frame was built: skip it (see `metal_texture`).
+        return true;
+    };
     let texture_size = size(
         DevicePixels(texture.width() as i32),
         DevicePixels(texture.height() as i32),
