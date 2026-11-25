@@ -40,10 +40,11 @@ struct CGSize {
 }
 
 type NSUInteger = u64;
-const YES: objc::runtime::BOOL = true;
+// `BOOL` is `bool` on aarch64 but `i8` on x86_64; use objc's own constants.
+use objc::runtime::YES;
 #[cfg(target_os = "macos")]
-#[allow(dead_code)]
-const NO: objc::runtime::BOOL = false;
+#[allow(unused_imports)]
+use objc::runtime::NO;
 
 // Exported to metal
 pub type PointF = gpui::Point<f32>;
